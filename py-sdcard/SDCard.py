@@ -11,107 +11,106 @@ class Command:
     """Represents various SD Card commands."""
 
     def __init__(self, name: str, index: int, response=1):
-        self.name = name
-        self.index = index
-        self.response = response
+        self._name = name
+        self._index = index
+        self._response = response
         
     def __str__(self) -> str:
-        return f"{self.name}({self.response})"
+        return f'{self._name}({self._response})'
 
     def encode(self, arg: int) -> bytearray:
         """Returns a bytearray(6) containing the SDCard command bytes."""
 
         # index and argument (5 bytes)
         result = bytearray()
-        result.append(0x40 | self.index)
+        result.append(0x40 | self._index)
         result.extend(int.to_bytes(arg, 4, 'big'))
         
-        # CMD0 and CMD8 require valid CRCs, others are ignored
-        if self.index == 0:
+        # CMD0 and CMD8 require valid CRCs, others are ignored when SPI is used
+        if self._index == 0:
             result.append(0x95)
-        elif self.index == 8:
+        elif self._index == 8:
             result.append(0x87)
         else:
             result.append(0)
 
         return result
 
-    #
-    def executeOn(self, card, arg, data):
-        pass
+    def has_extra_response(self) -> bool:
+        """Response types 3 & 7 have extra response data."""
+        
+        return (self._response == 3) or (self._response == 7)
+
+class Response:
+    """Data holder for the SD Card response."""
+    
+    def __init__(self, response: int, extra=None):
+        self.response = response
+        self.extra = extra
+
+    def __str__(self) -> str:
+        x = None if self.extra == None else f'{self.extra:#x}'
+        return f'Response(0b{self.response:08b},{x})'
 
 class SDCard:
-    """A layer above the SPI hardware, manages the SD state and data exchange."""
+    """A layer above the SPI hardware, manages the SD card state and data exchange."""
 
     commands = {
-        "CMD0": Command("CMD0", 0),
-        "CMD8": Command("CMD8", 8, 7)
+        'CMD0': Command('CMD0', 0),
+        'CMD8': Command('CMD8', 8, 7)
     }
 
     def __init__(self, spi=0, pin=17):
-        """ 
-        Parameters
-        ----------
-        spi : int
-            SD card command name
-        arg : int
-            Unsigned 32 bit integer argument 
-        data : bytearray
-            Optional data to append to the command, not all commands support this.
+        self._cs = Pin(pin, mode=Pin.OUT, value=1)
+        self._spi = SPI(spi)
+        self._spi.init(baudrate=400_000, polarity=0, phase=0, bits=8)
 
-        """
-        self.cs = Pin(pin, mode=Pin.OUT, value=1)
-        self.spi = SPI(spi)
-        self.spi.init(baudrate=400_000, polarity=0, phase=0, bits=8)
+    def execute(self, cmd, arg, txdata=b''):
+        """Run a command on the card and return a Response.""" 
 
-    def execute(self, cmd, arg, data=b''):
-        """ 
-        Parameters
-        ----------
-        cmd : str
-            SD card command name
-        arg : int
-            Unsigned 32 bit integer argument 
-        data : bytearray
-            Optional data to append to the command, not all commands support this.
-
-        Raises
-        ------
-        
-        """
-        command = commands[cmd]
-        response = command.executeOn(self, arg, data)
-        
+        command = SDCard.commands[cmd]
+        request = command.encode(arg)       # 6 bytes
         try:
-            self.cs(0)
-            self.spi.write(outBuff) 
-            for x in range(9):
-                response = self.spi.read(1, 0xff)           # read response
-                if response == b'\xff':
-                    if x < 9:
-                        continue
-                    else:
-                        raise Error("No response")
-                if response == b'\x01':
+            b = 0
+            
+            # Send command frame
+            self._cs(0)
+            self._spi.write(request)
+            
+            # Wait for first and possibly only, response byte
+            for x in range(8):
+                b = self._spi.read(1, 0xff)  # read from DI with DO high (8 bits)
+                if b != b'\xff':
                     break
-                raise ValueError(response)
-        finally:
-            self.cs(1)
+                elif x >= 8:
+                    raise Error("No response within expected time frame")
 
-    #
-    # Run CMD0
-    #
-    # Returns a Response.
-    #
-    def goIdleState(self):
-        return execute("CMD0", 0)
-    
-    #
-    # Force card to enter native operating mode by sending 80 clocks with DO high
-    #
+            # Handle R3/R7 format responses
+            if command.has_extra_response():
+                return Response(int.from_bytes(b, 1, 'big'), int.from_bytes(self._spi.read(4, 0xff), 4, 'big'))
+            else:
+                return Response(int.from_bytes(b, 1, 'big'))
+
+        finally:
+            self._cs(1)
+
+    def go_idle_state(self):
+        """Send software reset."""
+
+        return self.execute("CMD0", 0)
+
+    def initialize(self):
+        """Reset card and """
+        pass
+
     def reset(self):
+        """Force card to enter native operating mode by sending 80 clocks with DO high."""
         try:
             for x in range(10):
-                self.spi.write(b'\xff')
+                self._spi.write(b'\xff')
         finally:
-            self.cs(1)
+            self._cs(1)
+
+    def send_if_cond(self):
+
+        return self.execute("CMD8", 0x1AA)
